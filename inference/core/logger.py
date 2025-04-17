@@ -16,7 +16,7 @@ if LOG_LEVEL == "ERROR" or LOG_LEVEL == "FATAL":
 def add_correlation(
     logger: logging.Logger, method_name: str, event_dict: Dict[str, Any]
 ) -> Dict[str, Any]:
-    from asgi_correlation_id import correlation_id
+    from asgi_correlation_id.context import correlation_id
 
     request_id = correlation_id.get()
     if request_id:
