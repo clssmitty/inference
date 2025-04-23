@@ -7,7 +7,7 @@ import time
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QSpinBox, QDoubleSpinBox, QComboBox
 import sys
 
-def process_video(video_path, output_path=None, model_name="yolov8n-pose-640", confidence=0.3, skip_frames=0):
+def process_video(video_path, output_path=None, model_name="yolov8n-pose-640", confidence=0.3, skip_frames=0, visualization_mode="skeleton"):
     """Run pose detection on a video file and save the result."""
     # If output path not specified, create one based on input path
     if output_path is None:
@@ -54,6 +54,38 @@ def process_video(video_path, output_path=None, model_name="yolov8n-pose-640", c
     circle_radius = 40  # Circle radius in pixels - increased
     circle_thickness = 1  # Increased thickness
     
+    # Define keypoint labels and colors for labeled visualization
+    LABELS = [
+        "nose", "left eye", "right eye", "left ear",
+        "right ear", "left shoulder", "right shoulder", "left elbow",
+        "right elbow", "left wrist", "right wrist", "left hip",
+        "right hip", "left knee", "right knee", "left ankle",
+        "right ankle"
+    ]
+
+    COLORS = [
+        "#FF6347", "#FF6347", "#FF6347", "#FF6347",
+        "#FF6347", "#FF1493", "#00FF00", "#FF1493",
+        "#00FF00", "#FF1493", "#00FF00", "#FFD700",
+        "#00BFFF", "#FFD700", "#00BFFF", "#FFD700",
+        "#00BFFF"
+    ]
+    COLORS = [sv.Color.from_hex(color_hex=c) for c in COLORS]
+    
+    # Create annotators based on visualization mode
+    edge_annotator = sv.EdgeAnnotator(
+        color=sv.Color.GREEN,
+        thickness=1
+    )
+    
+    vertex_annotator = sv.VertexAnnotator()
+    
+    vertex_label_annotator = sv.VertexLabelAnnotator(
+        color=COLORS,
+        text_color=sv.Color.BLACK,
+        border_radius=5
+    )
+    
     # Process video frames
     while True:
         ret, frame = video.read()
@@ -83,15 +115,26 @@ def process_video(video_path, output_path=None, model_name="yolov8n-pose-640", c
         # Draw skeleton keypoints
         annotated_frame = frame.copy()
         
-        # Use edge annotator for skeleton visualization
-        edge_annotator = sv.EdgeAnnotator(
-            color=sv.Color.GREEN,
-            thickness=1
-        )
-        annotated_frame = edge_annotator.annotate(
-            scene=annotated_frame,
-            key_points=key_points
-        )
+        # Apply visualization based on selected mode
+        if visualization_mode == "skeleton":
+            # Use edge annotator for skeleton visualization
+            annotated_frame = edge_annotator.annotate(
+                scene=annotated_frame,
+                key_points=key_points
+            )
+        elif visualization_mode == "labels":
+            # First draw the skeleton connections
+            annotated_frame = vertex_annotator.annotate(
+                scene=annotated_frame,
+                key_points=key_points
+            )
+            
+            # Then add the labeled keypoints
+            annotated_frame = vertex_label_annotator.annotate(
+                scene=annotated_frame,
+                key_points=key_points,
+                labels=LABELS
+            )
         
         # Draw bounding boxes
         annotated_frame = box_annotator.annotate(
@@ -200,6 +243,14 @@ class VideoProcessingApp(QMainWindow):
         ])
         layout.addWidget(self.model_combo)
         
+        # Add visualization mode dropdown
+        vis_label = QLabel("Visualization Mode:")
+        layout.addWidget(vis_label)
+        
+        self.vis_combo = QComboBox()
+        self.vis_combo.addItems(["skeleton", "labels"])
+        layout.addWidget(self.vis_combo)
+        
         # Add confidence threshold
         conf_label = QLabel("Confidence Threshold:")
         layout.addWidget(conf_label)
@@ -261,13 +312,15 @@ class VideoProcessingApp(QMainWindow):
             model_name = self.model_combo.currentText()
             confidence = self.conf_spin.value()
             skip_frames = self.skip_spin.value()
+            visualization_mode = self.vis_combo.currentText()
             
             # Process the video
             output_path = process_video(
                 video_path=self.video_path,
                 model_name=model_name,
                 confidence=confidence,
-                skip_frames=skip_frames
+                skip_frames=skip_frames,
+                visualization_mode=visualization_mode
             )
             
             self.status_label.setText(f"Processing complete! Output: {os.path.basename(output_path)}")
