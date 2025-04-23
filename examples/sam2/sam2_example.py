@@ -50,6 +50,10 @@ class ImageClickLabel(QLabel):
         self.polygon_mode = False
         self.polygon_points = []  # Points in the polygon (original image coordinates)
         self.scaled_polygon_points = []  # Points in display coordinates
+        
+        # Applied masks mode
+        self.applied_masks_mode = False
+        self.applied_masks_pixmap = None
     
     def set_app(self, app):
         self.app = app
@@ -63,6 +67,8 @@ class ImageClickLabel(QLabel):
         self.saved_mask_colors = []
         self.polygon_points = []
         self.scaled_polygon_points = []
+        self.applied_masks_mode = False
+        self.applied_masks_pixmap = None
         
         pixmap = QPixmap(image_path)
         self.original_pixmap = pixmap  # Store the original pixmap
@@ -281,6 +287,15 @@ class ImageClickLabel(QLabel):
             
         painter = QPainter(self)
         
+        # If in applied masks mode, show the applied masks pixmap instead of normal rendering
+        if self.applied_masks_mode and self.applied_masks_pixmap:
+            # Scale pixmap while maintaining aspect ratio
+            scaled_pixmap = self.applied_masks_pixmap.scaled(self.size(), Qt.KeepAspectRatio)
+            
+            # Draw the applied masks pixmap
+            painter.drawPixmap(self.pixmap_offset, scaled_pixmap)
+            return
+            
         # Draw saved masks first
         for i, saved_mask in enumerate(self.saved_masks):
             # Create a semi-transparent overlay for the saved mask
@@ -394,6 +409,98 @@ class ImageClickLabel(QLabel):
                     # Use a different style for the closing line
                     painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.DotLine))
                     painter.drawLine(QPoint(start_x, start_y), QPoint(end_x, end_y))
+
+    def apply_masks(self):
+        """Apply all saved masks and current mask to create a white-masked view"""
+        if not self.original_pixmap:
+            return False
+            
+        # If we don't have any masks to apply, return false
+        if not self.saved_masks and self.segmentation_mask is None:
+            return False
+            
+        # Create a combined mask of all saved masks and current mask
+        combined_mask = np.zeros((self.orig_height, self.orig_width), dtype=np.bool_)
+        
+        # Add all saved masks
+        for mask in self.saved_masks:
+            combined_mask = np.logical_or(combined_mask, mask)
+            
+        # Add current mask if it exists
+        if self.segmentation_mask is not None:
+            if len(self.segmentation_mask.shape) == 3:
+                combined_mask = np.logical_or(combined_mask, self.segmentation_mask[0])
+            else:
+                combined_mask = np.logical_or(combined_mask, self.segmentation_mask)
+                
+        # Create a copy of the original image as a numpy array
+        image_array = np.array(self.image_data)
+        
+        # Set all masked pixels to white (255, 255, 255)
+        image_array[combined_mask] = [255, 255, 255]
+        
+        # Convert back to QPixmap
+        height, width, channels = image_array.shape
+        bytes_per_line = channels * width
+        qt_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        self.applied_masks_pixmap = QPixmap.fromImage(qt_image)
+        
+        # Enable applied masks mode
+        self.applied_masks_mode = True
+        
+        # Update the display
+        self.update()
+        
+        return True
+        
+    def apply_anti_masks(self):
+        """Apply anti-masks to show only the masked regions and everything else white"""
+        if not self.original_pixmap:
+            return False
+            
+        # If we don't have any masks to apply, return false
+        if not self.saved_masks and self.segmentation_mask is None:
+            return False
+            
+        # Create a combined mask of all saved masks and current mask
+        combined_mask = np.zeros((self.orig_height, self.orig_width), dtype=np.bool_)
+        
+        # Add all saved masks
+        for mask in self.saved_masks:
+            combined_mask = np.logical_or(combined_mask, mask)
+            
+        # Add current mask if it exists
+        if self.segmentation_mask is not None:
+            if len(self.segmentation_mask.shape) == 3:
+                combined_mask = np.logical_or(combined_mask, self.segmentation_mask[0])
+            else:
+                combined_mask = np.logical_or(combined_mask, self.segmentation_mask)
+                
+        # Create a copy of the original image as a numpy array
+        image_array = np.array(self.image_data)
+        
+        # Set all non-masked pixels to white (255, 255, 255)
+        image_array[~combined_mask] = [255, 255, 255]
+        
+        # Convert back to QPixmap
+        height, width, channels = image_array.shape
+        bytes_per_line = channels * width
+        qt_image = QImage(image_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        self.applied_masks_pixmap = QPixmap.fromImage(qt_image)
+        
+        # Enable applied masks mode
+        self.applied_masks_mode = True
+        
+        # Update the display
+        self.update()
+        
+        return True
+        
+    def exit_applied_masks_mode(self):
+        """Exit the applied masks mode"""
+        self.applied_masks_mode = False
+        self.applied_masks_pixmap = None
+        self.update()
 
 
 class SAM2App(QMainWindow):
@@ -514,6 +621,33 @@ class SAM2App(QMainWindow):
         polygon_group.setLayout(polygon_layout)
         controls_layout.addWidget(polygon_group)
         
+        # Applied Masks Group
+        applied_group = QGroupBox("Applied Masks")
+        applied_layout = QVBoxLayout()
+        
+        self.apply_masks_btn = QPushButton("Apply Masks")
+        self.apply_masks_btn.clicked.connect(self.apply_masks)
+        self.apply_masks_btn.setEnabled(False)
+        applied_layout.addWidget(self.apply_masks_btn)
+        
+        self.apply_anti_masks_btn = QPushButton("Apply Anti-Mask")
+        self.apply_anti_masks_btn.clicked.connect(self.apply_anti_masks)
+        self.apply_anti_masks_btn.setEnabled(False)
+        applied_layout.addWidget(self.apply_anti_masks_btn)
+        
+        self.exit_applied_btn = QPushButton("Exit Applied View")
+        self.exit_applied_btn.clicked.connect(self.exit_applied_masks)
+        self.exit_applied_btn.setEnabled(False)
+        applied_layout.addWidget(self.exit_applied_btn)
+        
+        self.save_applied_btn = QPushButton("Save Applied View")
+        self.save_applied_btn.clicked.connect(self.save_applied_view)
+        self.save_applied_btn.setEnabled(False)
+        applied_layout.addWidget(self.save_applied_btn)
+        
+        applied_group.setLayout(applied_layout)
+        controls_layout.addWidget(applied_group)
+        
         main_layout.addLayout(controls_layout)
         
         # Status label
@@ -555,6 +689,10 @@ class SAM2App(QMainWindow):
             # Enable polygon drawing even if model isn't loaded yet
             self.start_polygon_btn.setEnabled(True)
             
+            # Enable apply masks button
+            self.apply_masks_btn.setEnabled(True)
+            self.apply_anti_masks_btn.setEnabled(True)
+            
             if self.sam_model:
                 self.embed_image()
     
@@ -575,6 +713,8 @@ class SAM2App(QMainWindow):
             self.save_mask_btn.setEnabled(True)
             self.save_masks_btn.setEnabled(True)
             self.load_masks_btn.setEnabled(True)
+            self.apply_masks_btn.setEnabled(True)
+            self.apply_anti_masks_btn.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to embed image: {str(e)}")
             self.status_label.setText(f"Error embedding image: {str(e)}")
@@ -901,6 +1041,86 @@ class SAM2App(QMainWindow):
         # Ensure our image display is updated when the window resizes
         if hasattr(self, 'image_label') and self.image_path:
             self.image_label.update_image_display()
+    
+    def apply_masks(self):
+        """Apply all masks to create a view with masked areas in white"""
+        if self.image_label.apply_masks():
+            # Update UI state
+            self.exit_applied_btn.setEnabled(True)
+            self.save_applied_btn.setEnabled(True)
+            
+            # Disable editing controls while in applied view
+            self.run_segment_btn.setEnabled(False)
+            self.save_mask_btn.setEnabled(False)
+            self.clear_points_btn.setEnabled(False)
+            self.clear_all_btn.setEnabled(False)
+            self.start_polygon_btn.setEnabled(False)
+            self.apply_masks_btn.setEnabled(False)
+            self.apply_anti_masks_btn.setEnabled(False)
+            
+            self.status_label.setText("Applied masks view active. Masked areas shown in white.")
+        else:
+            QMessageBox.warning(self, "Warning", "No masks to apply!")
+            
+    def apply_anti_masks(self):
+        """Apply anti-masks to show only the masked regions and everything else white"""
+        if self.image_label.apply_anti_masks():
+            # Update UI state
+            self.exit_applied_btn.setEnabled(True)
+            self.save_applied_btn.setEnabled(True)
+            
+            # Disable editing controls while in applied view
+            self.run_segment_btn.setEnabled(False)
+            self.save_mask_btn.setEnabled(False)
+            self.clear_points_btn.setEnabled(False)
+            self.clear_all_btn.setEnabled(False)
+            self.start_polygon_btn.setEnabled(False)
+            self.apply_masks_btn.setEnabled(False)
+            self.apply_anti_masks_btn.setEnabled(False)
+            
+            self.status_label.setText("Applied anti-masks view active. Only masked areas are visible.")
+        else:
+            QMessageBox.warning(self, "Warning", "No masks to apply!")
+            
+    def exit_applied_masks(self):
+        """Exit the applied masks view"""
+        self.image_label.exit_applied_masks_mode()
+        
+        # Update UI state
+        self.exit_applied_btn.setEnabled(False)
+        self.save_applied_btn.setEnabled(False)
+        
+        # Re-enable editing controls
+        if self.sam_model and self.image_path:
+            self.run_segment_btn.setEnabled(True)
+        self.save_mask_btn.setEnabled(True)
+        self.clear_points_btn.setEnabled(True)
+        self.clear_all_btn.setEnabled(True)
+        self.start_polygon_btn.setEnabled(True)
+        self.apply_masks_btn.setEnabled(True)
+        self.apply_anti_masks_btn.setEnabled(True)
+        
+        self.status_label.setText("Exited applied masks view.")
+        
+    def save_applied_view(self):
+        """Save the current applied masks view as an image"""
+        if not self.image_label.applied_masks_mode or not self.image_label.applied_masks_pixmap:
+            QMessageBox.warning(self, "Warning", "No applied masks view to save!")
+            return
+            
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Applied View", "", "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*)",
+            options=options
+        )
+        
+        if file_path:
+            try:
+                # Save the applied masks pixmap directly
+                self.image_label.applied_masks_pixmap.save(file_path)
+                self.status_label.setText(f"Applied view saved to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save applied view: {str(e)}")
 
 
 if __name__ == "__main__":
