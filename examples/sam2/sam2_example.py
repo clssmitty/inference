@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+import cv2
 from PIL import Image
 import supervision as sv
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -44,6 +45,11 @@ class ImageClickLabel(QLabel):
             QColor(0, 255, 255, 128),   # Cyan
             QColor(255, 0, 0, 128),     # Red
         ]
+        
+        # Polygon drawing mode
+        self.polygon_mode = False
+        self.polygon_points = []  # Points in the polygon (original image coordinates)
+        self.scaled_polygon_points = []  # Points in display coordinates
     
     def set_app(self, app):
         self.app = app
@@ -55,6 +61,8 @@ class ImageClickLabel(QLabel):
         self.scaled_points = []
         self.saved_masks = []
         self.saved_mask_colors = []
+        self.polygon_points = []
+        self.scaled_polygon_points = []
         
         pixmap = QPixmap(image_path)
         self.original_pixmap = pixmap  # Store the original pixmap
@@ -98,12 +106,20 @@ class ImageClickLabel(QLabel):
     
     def update_scaled_points(self):
         """Update the scaled points based on the current scale factors"""
+        # Update SAM points
         self.scaled_points = []
         for point in self.points:
             # Convert original image coordinates to current display coordinates
             scaled_x = int(point[0] / self.scale_factor_w)
             scaled_y = int(point[1] / self.scale_factor_h)
             self.scaled_points.append([scaled_x, scaled_y])
+            
+        # Update polygon points
+        self.scaled_polygon_points = []
+        for point in self.polygon_points:
+            scaled_x = int(point[0] / self.scale_factor_w)
+            scaled_y = int(point[1] / self.scale_factor_h)
+            self.scaled_polygon_points.append([scaled_x, scaled_y])
     
     def resizeEvent(self, event):
         """Handle resize events to update image display"""
@@ -111,6 +127,7 @@ class ImageClickLabel(QLabel):
         self.update_image_display()
     
     def add_point(self, pos, is_positive):
+        """Add a point for SAM segmentation"""
         # Adjust for the pixmap offset (for centered images)
         adjusted_pos = QPoint(pos.x() - self.pixmap_offset.x(), pos.y() - self.pixmap_offset.y())
         
@@ -131,6 +148,55 @@ class ImageClickLabel(QLabel):
         self.points.append([original_x, original_y])
         self.scaled_points.append([adjusted_pos.x(), adjusted_pos.y()])
         self.labels.append(is_positive)
+        self.update()
+    
+    def add_polygon_point(self, pos):
+        """Add a point to the polygon being drawn"""
+        # Adjust for the pixmap offset (for centered images)
+        adjusted_pos = QPoint(pos.x() - self.pixmap_offset.x(), pos.y() - self.pixmap_offset.y())
+        
+        # Check if the click is within the image boundaries
+        if adjusted_pos.x() < 0 or adjusted_pos.y() < 0 or \
+           adjusted_pos.x() >= self.pixmap().width() or adjusted_pos.y() >= self.pixmap().height():
+            return  # Ignore clicks outside the image
+        
+        # Convert position to original image coordinates
+        original_x = int(adjusted_pos.x() * self.scale_factor_w)
+        original_y = int(adjusted_pos.y() * self.scale_factor_h)
+        
+        if self.debug_mode:
+            print(f"Polygon point: {original_x}, {original_y}")
+            
+        self.polygon_points.append([original_x, original_y])
+        self.scaled_polygon_points.append([adjusted_pos.x(), adjusted_pos.y()])
+        self.update()
+    
+    def finish_polygon(self):
+        """Complete the polygon and create a mask from it"""
+        if len(self.polygon_points) < 3:
+            return False  # Need at least 3 points to create a polygon
+            
+        # Create an empty mask with the same dimensions as the original image
+        mask = np.zeros((self.orig_height, self.orig_width), dtype=np.uint8)
+        
+        # Convert points to numpy array for OpenCV
+        points = np.array([self.polygon_points], dtype=np.int32)
+        
+        # Fill the polygon with 255 values using OpenCV
+        cv2.fillPoly(mask, points, 255)
+        
+        # Convert to boolean mask for consistency with SAM masks
+        bool_mask = mask > 0
+        
+        # Set the current segmentation mask to the polygon mask
+        self.segmentation_mask = bool_mask
+        
+        return True
+    
+    def clear_polygon(self):
+        """Clear the current polygon points"""
+        self.polygon_points = []
+        self.scaled_polygon_points = []
         self.update()
     
     def clear_points(self):
@@ -162,6 +228,8 @@ class ImageClickLabel(QLabel):
             self.points = []
             self.labels = []
             self.scaled_points = []
+            self.polygon_points = []
+            self.scaled_polygon_points = []
             self.update()
             return True
         return False
@@ -173,17 +241,34 @@ class ImageClickLabel(QLabel):
         self.segmentation_mask = None
         self.update()
     
+    def start_polygon_mode(self):
+        """Enter polygon drawing mode"""
+        self.polygon_mode = True
+        self.polygon_points = []
+        self.scaled_polygon_points = []
+        self.update()
+    
+    def exit_polygon_mode(self):
+        """Exit polygon drawing mode"""
+        self.polygon_mode = False
+        self.polygon_points = []
+        self.scaled_polygon_points = []
+        self.update()
+    
     def mousePressEvent(self, event):
         if not self.pixmap():
             return
         
         if event.button() == Qt.LeftButton and self.app is not None:
-            is_positive = self.app.is_positive_point()
-            self.add_point(event.pos(), is_positive)
-            # After adding a point, clear existing current mask to ensure it gets updated
-            # but keep the saved masks
-            self.segmentation_mask = None
-            self.app.run_segmentation()
+            if self.polygon_mode:
+                self.add_polygon_point(event.pos())
+            else:
+                is_positive = self.app.is_positive_point()
+                self.add_point(event.pos(), is_positive)
+                # After adding a point, clear existing current mask to ensure it gets updated
+                # but keep the saved masks
+                self.segmentation_mask = None
+                self.app.run_segmentation()
     
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -259,7 +344,7 @@ class ImageClickLabel(QLabel):
             # Draw the mask with the same offset as the image
             painter.drawPixmap(self.pixmap_offset, scaled_mask)
         
-        # Draw points
+        # Draw SAM points
         for i, point in enumerate(self.scaled_points):
             if self.labels[i]:  # Positive point (green)
                 painter.setPen(QPen(QColor(0, 255, 0), 5))
@@ -271,6 +356,41 @@ class ImageClickLabel(QLabel):
             point_y = point[1] + self.pixmap_offset.y()
             painter.drawPoint(QPoint(point_x, point_y))
             painter.drawEllipse(QPoint(point_x, point_y), 5, 5)
+        
+        # Draw polygon points and lines in polygon mode
+        if self.polygon_mode and len(self.scaled_polygon_points) > 0:
+            # Draw polygon points in yellow
+            painter.setPen(QPen(QColor(255, 255, 0), 5))
+            
+            # Draw each point
+            for point in self.scaled_polygon_points:
+                point_x = point[0] + self.pixmap_offset.x()
+                point_y = point[1] + self.pixmap_offset.y()
+                painter.drawPoint(QPoint(point_x, point_y))
+                painter.drawEllipse(QPoint(point_x, point_y), 5, 5)
+            
+            # Connect points with lines
+            if len(self.scaled_polygon_points) > 1:
+                painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.DashLine))
+                
+                for i in range(len(self.scaled_polygon_points) - 1):
+                    start_x = self.scaled_polygon_points[i][0] + self.pixmap_offset.x()
+                    start_y = self.scaled_polygon_points[i][1] + self.pixmap_offset.y()
+                    end_x = self.scaled_polygon_points[i+1][0] + self.pixmap_offset.x()
+                    end_y = self.scaled_polygon_points[i+1][1] + self.pixmap_offset.y()
+                    
+                    painter.drawLine(QPoint(start_x, start_y), QPoint(end_x, end_y))
+                
+                # Connect last point to first point to show the complete polygon
+                if len(self.scaled_polygon_points) > 2:
+                    start_x = self.scaled_polygon_points[-1][0] + self.pixmap_offset.x()
+                    start_y = self.scaled_polygon_points[-1][1] + self.pixmap_offset.y()
+                    end_x = self.scaled_polygon_points[0][0] + self.pixmap_offset.x()
+                    end_y = self.scaled_polygon_points[0][1] + self.pixmap_offset.y()
+                    
+                    # Use a different style for the closing line
+                    painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.DotLine))
+                    painter.drawLine(QPoint(start_x, start_y), QPoint(end_x, end_y))
 
 
 class SAM2App(QMainWindow):
@@ -370,6 +490,27 @@ class SAM2App(QMainWindow):
         segment_group.setLayout(segment_layout)
         controls_layout.addWidget(segment_group)
         
+        # Polygon Mask Group
+        polygon_group = QGroupBox("Custom Polygon Mask")
+        polygon_layout = QVBoxLayout()
+        
+        self.start_polygon_btn = QPushButton("Start Polygon Mask")
+        self.start_polygon_btn.clicked.connect(self.start_polygon_mode)
+        polygon_layout.addWidget(self.start_polygon_btn)
+        
+        self.finish_polygon_btn = QPushButton("Finish Polygon")
+        self.finish_polygon_btn.clicked.connect(self.finish_polygon)
+        self.finish_polygon_btn.setEnabled(False)
+        polygon_layout.addWidget(self.finish_polygon_btn)
+        
+        self.cancel_polygon_btn = QPushButton("Cancel Polygon")
+        self.cancel_polygon_btn.clicked.connect(self.cancel_polygon)
+        self.cancel_polygon_btn.setEnabled(False)
+        polygon_layout.addWidget(self.cancel_polygon_btn)
+        
+        polygon_group.setLayout(polygon_layout)
+        controls_layout.addWidget(polygon_group)
+        
         main_layout.addLayout(controls_layout)
         
         # Status label
@@ -408,6 +549,9 @@ class SAM2App(QMainWindow):
             self.image_label.set_image(file_path)
             self.status_label.setText(f"Image loaded: {os.path.basename(file_path)}")
             
+            # Enable polygon drawing even if model isn't loaded yet
+            self.start_polygon_btn.setEnabled(True)
+            
             if self.sam_model:
                 self.embed_image()
     
@@ -439,6 +583,55 @@ class SAM2App(QMainWindow):
         self.image_label.clear_points()
         self.status_label.setText("Points cleared. Click on the image to add new points.")
     
+    def start_polygon_mode(self):
+        """Start drawing a polygon mask"""
+        self.image_label.start_polygon_mode()
+        
+        # Update UI state
+        self.start_polygon_btn.setEnabled(False)
+        self.finish_polygon_btn.setEnabled(True)
+        self.cancel_polygon_btn.setEnabled(True)
+        
+        # Disable SAM segmentation controls while in polygon mode
+        self.run_segment_btn.setEnabled(False)
+        self.save_mask_btn.setEnabled(True)  # Keep enabled for saving the polygon
+        
+        self.status_label.setText("Polygon mode active. Click on the image to add polygon points.")
+    
+    def finish_polygon(self):
+        """Finish the polygon and create a mask from it"""
+        if self.image_label.finish_polygon():
+            # Exit polygon mode
+            self.image_label.polygon_mode = False
+            
+            # Update UI state
+            self.start_polygon_btn.setEnabled(True)
+            self.finish_polygon_btn.setEnabled(False)
+            self.cancel_polygon_btn.setEnabled(False)
+            
+            # Re-enable SAM segmentation if available
+            if self.sam_model and self.image_path:
+                self.run_segment_btn.setEnabled(True)
+            
+            self.status_label.setText("Polygon mask created. Use 'Save Mask' to keep it.")
+        else:
+            QMessageBox.warning(self, "Warning", "Need at least 3 points to create a polygon mask.")
+    
+    def cancel_polygon(self):
+        """Cancel polygon drawing mode"""
+        self.image_label.exit_polygon_mode()
+        
+        # Update UI state
+        self.start_polygon_btn.setEnabled(True)
+        self.finish_polygon_btn.setEnabled(False)
+        self.cancel_polygon_btn.setEnabled(False)
+        
+        # Re-enable SAM segmentation if available
+        if self.sam_model and self.image_path:
+            self.run_segment_btn.setEnabled(True)
+        
+        self.status_label.setText("Polygon drawing canceled.")
+    
     def clear_all_masks(self):
         self.image_label.clear_all_masks()
         self.status_label.setText("All masks cleared. Click on the image to create new masks.")
@@ -447,6 +640,10 @@ class SAM2App(QMainWindow):
         if self.image_label.save_current_mask():
             current_mask_count = len(self.image_label.saved_masks)
             self.status_label.setText(f"Mask saved. Total saved masks: {current_mask_count}")
+            
+            # If we were in polygon mode, exit it
+            if self.image_label.polygon_mode:
+                self.cancel_polygon()
         else:
             QMessageBox.warning(self, "Warning", "No active mask to save!")
     
@@ -575,7 +772,7 @@ class SAM2App(QMainWindow):
                     detections.class_id = [0]
                     annotated_image = current_mask_annotator.annotate(annotated_image, detections)
                 
-                # Add points
+                # Add SAM points
                 for i, point in enumerate(self.image_label.points):
                     color = sv.Color.from_hex("#00FF00") if self.image_label.labels[i] else sv.Color.from_hex("#FF0000")
                     point_annotator = sv.PointAnnotator(color=color, radius=10)
@@ -583,6 +780,15 @@ class SAM2App(QMainWindow):
                         xyxy=np.array([[point[0], point[1], point[0]+1, point[1]+1]]),
                     )
                     annotated_image = point_annotator.annotate(annotated_image, point_detection)
+                
+                # Add polygon points if in polygon mode
+                if self.image_label.polygon_mode and self.image_label.polygon_points:
+                    point_annotator = sv.PointAnnotator(color=sv.Color.from_hex("#FFFF00"), radius=10)
+                    for point in self.image_label.polygon_points:
+                        point_detection = sv.Detections(
+                            xyxy=np.array([[point[0], point[1], point[0]+1, point[1]+1]]),
+                        )
+                        annotated_image = point_annotator.annotate(annotated_image, point_detection)
                 
                 # Save the result
                 Image.fromarray(annotated_image).save(file_path)
