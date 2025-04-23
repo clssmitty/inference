@@ -191,6 +191,9 @@ class ImageClickLabel(QLabel):
         # Set the current segmentation mask to the polygon mask
         self.segmentation_mask = bool_mask
         
+        # Immediately update the display
+        self.update()
+        
         return True
     
     def clear_polygon(self):
@@ -612,6 +615,10 @@ class SAM2App(QMainWindow):
             # Re-enable SAM segmentation if available
             if self.sam_model and self.image_path:
                 self.run_segment_btn.setEnabled(True)
+            
+            # Force update to display the mask immediately
+            self.image_label.update()
+            QApplication.processEvents()
             
             self.status_label.setText("Polygon mask created. Use 'Save Mask' to keep it.")
         else:
